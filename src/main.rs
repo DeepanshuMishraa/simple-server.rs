@@ -14,14 +14,17 @@ struct GreetResponse{
     message:String,
 }
 
-type Db = Arc<Mutex<HashMap<u32,User>>>; // Mutex is to implement mutual exclusion so that no two
-                                         // threads can access the data at the same time.
 #[derive(Serialize)]
 struct UserResponse{
     id:u32,
     name:String,
     age:u32,
 }
+
+
+type Db = Arc<Mutex<HashMap<u32,User>>>; // Mutex is to implement mutual exclusion so that no two
+                                         // threads can access the data at the same time.
+
 
 
 #[get("/greet")]
