@@ -1,79 +1,101 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
+use diesel::{PgConnection, RunQueryDsl};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-use serde::{Serialize,Deserialize};
+mod db;
+mod models;
+mod schema;
 
-#[derive(Serialize,Deserialize)]
-struct User{
-    name:String,
-    age:u32,
+#[derive(Serialize, Deserialize)]
+struct User {
+    name: String,
+    age: u32,
+}
+
+
+#[derive(Serialize)]
+struct GreetResponse {
+    message: String,
 }
 
 #[derive(Serialize)]
-struct GreetResponse{
-    message:String,
+struct UserResponse {
+    name: String,
+    age: u32,
 }
-
-#[derive(Serialize)]
-struct UserResponse{
-    id:u32,
-    name:String,
-    age:u32,
-}
-
-
-type Db = Arc<Mutex<HashMap<u32,User>>>; // Mutex is to implement mutual exclusion so that no two
-                                         // threads can access the data at the same time.
-
-
 
 #[get("/greet")]
-async fn greet()-> impl Responder{
-    HttpResponse::Ok().json(GreetResponse{
-        message:"Hello, world".to_string(),
+async fn greet() -> impl Responder {
+    HttpResponse::Ok().json(GreetResponse {
+        message: "Hello, world".to_string(),
     })
 }
 
 #[get("/greet/{name}")]
-async fn greet_name(name: web::Path<String>)->impl Responder{
+async fn greet_name(name: web::Path<String>) -> impl Responder {
     let name = name.into_inner(); // get name from the Path 
-    HttpResponse::Ok().json(GreetResponse{
-        message:"Hello ".to_string() + &name,
+    HttpResponse::Ok().json(GreetResponse {
+        message: "Hello ".to_string() + &name,
     })
 }
 
 #[post("/user/create")]
-async fn create_user(user_data:web::Json<User>,db:web::Data<Db>)->impl Responder{
-    let mut db = db.lock().unwrap(); //lock the db 
+async fn create_user(
+    user_data: web::Json<User>,
+    db_pool: web::Data<Arc<Mutex<PgConnection>>>,
+) -> impl Responder {
+    use crate::schema::users;
 
-    let new_id = db.keys().max().unwrap_or(&0) + 1; // get the max id and increment it by 1
-                                                    
-    let name = user_data.name.clone(); // clone the name to avoid ownership issues
-    let age = user_data.age; // get the age
+    let mut connection = db_pool.lock().unwrap();
 
-    db.insert(new_id,user_data.into_inner()); // insert the new user into the db
+    let new_user = models::NewUser {
+        name: user_data.name.clone(),
+        age: user_data.age as i32,
+    };
 
-    HttpResponse::Created().json(UserResponse{
-        id: new_id,
-        name,
-        age,
-    })
+    match diesel::insert_into(users::table)
+        .values(&new_user)
+        .execute(&mut *connection)
+    {
+        Ok(_) => HttpResponse::Created().json(UserResponse {
+            name: user_data.name.clone(),
+            age: user_data.age,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(format!("Failed to create user: {}", e)),
+    }
 }
 
+#[get("/user/users")]
+async fn get_users(db_pool: web::Data<Arc<Mutex<PgConnection>>>) -> impl Responder {
+    use crate::schema::users;
+
+    let mut connection = db_pool.lock().unwrap();
+
+    let results = users::table
+        .load::<models::DbUser>(&mut *connection)
+        .expect("Error loading users");
+
+    HttpResponse::Ok().json(results)
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let port = 8000; 
-    println!("Server is running on port {}",port);
+    let port = 8000;
+    println!("Server is running on port {}", port);
 
-    let user_db:Db = Arc::new(Mutex::new(HashMap::<u32, User>::new())); // create a new database
+    let connection = db::connect_db(); // Get the actual connection
+    let db_pool = Arc::new(Mutex::new(connection)); // Wrap it properly
 
-    HttpServer::new(move ||
-        {
-            let app_data = web::Data::new(user_db.clone());
-            App::new().app_data(app_data).service(greet).service(greet_name).service(create_user)
-        }).
-    bind(("127.0.0.1",port))?
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(db_pool.clone())) // Clone the Arc for each worker
+            .service(greet)
+            .service(greet_name)
+            .service(create_user)
+            .service(get_users)
+    })
+    .bind(("127.0.0.1", port))?
     .workers(2)
     .run()
     .await
